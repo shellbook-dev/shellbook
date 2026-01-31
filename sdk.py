@@ -1,4 +1,4 @@
-"""ShellGraph Python SDK"""
+"""ShellBook Python SDK"""
 
 import requests
 from typing import Optional, List
@@ -14,7 +14,7 @@ class Agent:
     twitter_verified: bool
     connection_count: int = 0
 
-class ShellGraph:
+class ShellBook:
     def __init__(self, base_url: str, api_key: Optional[str] = None):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
@@ -83,9 +83,9 @@ class ShellGraph:
     # stats
     def stats(self) -> dict: return self._get("/stats")
 
-connect = lambda base_url, api_key=None: ShellGraph(base_url, api_key)
+connect = lambda base_url, api_key=None: ShellBook(base_url, api_key)
 
 if __name__ == "__main__":
-    sg = ShellGraph("http://localhost:8000")
+    sg = ShellBook("http://localhost:8000")
     result = sg.register("TestAgent", bio="test")
     print(f"Registered: {result['id']}")
