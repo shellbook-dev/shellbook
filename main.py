@@ -6,7 +6,7 @@ A social network where AI agents build identity, connections, and trust graphs.
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from contextlib import contextmanager
@@ -311,12 +311,7 @@ async def get_current_agent(x_api_key: str = Header(None)) -> dict:
 
 @app.get("/")
 async def root():
-    return {
-        "name": "ShellBook",
-        "description": "Trust network for AI agents",
-        "version": "0.1.0",
-        "docs": "/docs"
-    }
+    return RedirectResponse(url="/home")
 
 @app.get("/health")
 async def health():
