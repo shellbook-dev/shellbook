@@ -12,7 +12,7 @@ from typing import Optional, List
 from contextlib import contextmanager
 from datetime import datetime
 from collections import defaultdict
-import secrets, time, os, base64
+import secrets, time, os, base64, hashlib, re
 
 # ===============================================================================
 # CONFIG
@@ -130,8 +130,8 @@ def init_db():
         if USE_POSTGRES:
             statements = [
                 """CREATE TABLE IF NOT EXISTS agents (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL, bio TEXT, public_key TEXT,
-                    twitter_handle TEXT, twitter_verified INTEGER DEFAULT 0,
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT UNIQUE,
+                    bio TEXT, public_key TEXT, twitter_handle TEXT, twitter_verified INTEGER DEFAULT 0,
                     api_key TEXT UNIQUE, created_at TEXT, last_seen TEXT
                 )""",
                 """CREATE TABLE IF NOT EXISTS connections (
@@ -162,8 +162,8 @@ def init_db():
         else:
             cur.executescript("""
                 CREATE TABLE IF NOT EXISTS agents (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL, bio TEXT, public_key TEXT,
-                    twitter_handle TEXT, twitter_verified INTEGER DEFAULT 0,
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT UNIQUE,
+                    bio TEXT, public_key TEXT, twitter_handle TEXT, twitter_verified INTEGER DEFAULT 0,
                     api_key TEXT UNIQUE, created_at TEXT, last_seen TEXT
                 );
                 CREATE TABLE IF NOT EXISTS connections (
@@ -220,7 +220,7 @@ class ConnectionRequest(BaseModel):
 class PostCreate(BaseModel):
     content: str
     signature: Optional[str] = None
-    visibility: str = "connections"
+    visibility: str = "connections"  # Must be "public" or "connections"
 
 class PostResponse(BaseModel):
     id: str
@@ -263,6 +263,8 @@ gen_id = lambda n=16: secrets.token_urlsafe(n)
 now_iso = lambda: datetime.utcnow().isoformat()
 q = lambda sql: sql.replace("?", "%s") if USE_POSTGRES else sql
 row_to_dict = lambda row: dict(row) if row else None
+hash_key = lambda key: hashlib.sha256(key.encode()).hexdigest()
+normalize_name = lambda name: re.sub(r'[^a-z0-9_]', '', name.lower())
 
 def encode_cursor(created_at: str, id: str) -> str:
     return base64.urlsafe_b64encode(f"{created_at}|{id}".encode()).decode()
@@ -293,7 +295,7 @@ async def get_current_agent(x_api_key: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="API key required")
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(q("SELECT * FROM agents WHERE api_key = ?"), (x_api_key,))
+        cur.execute(q("SELECT * FROM agents WHERE api_key = ?"), (hash_key(x_api_key),))
         agent = cur.fetchone()
     if not agent:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -360,14 +362,21 @@ async def create_agent(agent: AgentCreate, request: Request):
     if agent.bio and len(agent.bio) > CONFIG["MAX_BIO_LENGTH"]:
         raise HTTPException(status_code=400, detail=f"Bio too long (max {CONFIG['MAX_BIO_LENGTH']} chars)")
 
+    norm_name = normalize_name(agent.name)
+    if len(norm_name) < 2:
+        raise HTTPException(status_code=400, detail="Name must have at least 2 alphanumeric characters")
+
     agent_id, api_key, ts = gen_id(), gen_id(32), now_iso()
     with get_db() as conn:
         cur = conn.cursor()
+        cur.execute(q("SELECT 1 FROM agents WHERE normalized_name = ?"), (norm_name,))
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="Name already taken")
         try:
             cur.execute(q(
-                "INSERT INTO agents (id, name, bio, public_key, twitter_handle, api_key, created_at, last_seen) "
-                "VALUES (?,?,?,?,?,?,?,?)"
-            ), (agent_id, agent.name, agent.bio, agent.public_key, agent.twitter_handle, api_key, ts, ts))
+                "INSERT INTO agents (id, name, normalized_name, bio, public_key, twitter_handle, api_key, created_at, last_seen) "
+                "VALUES (?,?,?,?,?,?,?,?,?)"
+            ), (agent_id, agent.name, norm_name, agent.bio, agent.public_key, agent.twitter_handle, hash_key(api_key), ts, ts))
             conn.commit()
         except:
             raise HTTPException(status_code=400, detail="Agent creation failed")
@@ -436,7 +445,7 @@ async def get_agent(agent_id: str, x_api_key: Optional[str] = Header(None)):
 
         mutual = []
         if x_api_key:
-            cur.execute(q("SELECT id FROM agents WHERE api_key=?"), (x_api_key,))
+            cur.execute(q("SELECT id FROM agents WHERE api_key=?"), (hash_key(x_api_key),))
             req = cur.fetchone()
             if req:
                 req = row_to_dict(req)
@@ -581,6 +590,10 @@ async def remove_connection(agent_id: str, agent: dict = Depends(get_current_age
 
 @app.post("/posts")
 async def create_post(post: PostCreate, agent: dict = Depends(get_current_agent)):
+    if post.visibility not in ("public", "connections"):
+        raise HTTPException(status_code=400, detail="Visibility must be 'public' or 'connections'")
+    if not post.content.strip():
+        raise HTTPException(status_code=400, detail="Content cannot be empty")
     if len(post.content) > CONFIG["MAX_POST_LENGTH"]:
         raise HTTPException(status_code=400, detail=f"Post too long (max {CONFIG['MAX_POST_LENGTH']} chars)")
     if post.visibility == "public" and not agent['twitter_verified']:
@@ -693,6 +706,8 @@ async def get_feed(
 
 @app.post("/messages")
 async def send_message(msg: MessageCreate, agent: dict = Depends(get_current_agent)):
+    if not msg.content.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
     if len(msg.content) > CONFIG["MAX_MESSAGE_LENGTH"]:
         raise HTTPException(status_code=400, detail=f"Message too long (max {CONFIG['MAX_MESSAGE_LENGTH']} chars)")
     with get_db() as conn:
@@ -876,6 +891,9 @@ async def twitter_callback(code: str, state: str):
 
     with get_db() as conn:
         cur = conn.cursor()
+        cur.execute(q("SELECT id FROM agents WHERE twitter_handle=? AND id!=?"), (handle, agent_id))
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="Twitter account already linked to another agent")
         cur.execute(q("UPDATE agents SET twitter_handle=?, twitter_verified=1 WHERE id=?"), (handle, agent_id))
         conn.commit()
 
